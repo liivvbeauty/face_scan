@@ -12,15 +12,17 @@ import google.generativeai as genai
 st.set_page_config(
     page_title="LIIVV Beauty | Face Relax Scanner",
     page_icon="✨",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
 
 # =========================================================
 # SECRETS ESPERADOS NO STREAMLIT
 # =========================================================
+# SPREADSHEET_ID = "ID_DA_PLANILHA"
+# ACCESS_SHEET_NAME = "Página1"
 # GEMINI_API_KEY = "SUA_CHAVE_GEMINI"
-# GOOGLE_SHEET_ID = "ID_DA_PLANILHA"
 #
 # [gcp_service_account]
 # type="service_account"
@@ -35,6 +37,15 @@ st.set_page_config(
 # client_x509_cert_url="..."
 
 
+SPREADSHEET_ID = st.secrets.get("SPREADSHEET_ID") or st.secrets.get("GOOGLE_SHEET_ID")
+ACCESS_SHEET_NAME = st.secrets.get("ACCESS_SHEET_NAME", "Página1")
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
 # =========================================================
 # IDENTIDADE VISUAL LIIVV
 # =========================================================
@@ -44,13 +55,11 @@ st.markdown(
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;500;600;700;800&display=swap');
 
-    .stApp {
-        background-color: #F7F2F4;
-    }
+    .stApp { background-color: #F7F2F4; }
 
     .block-container {
-        padding-top: 1.5rem;
-        max-width: 1080px;
+        padding-top: 1.4rem;
+        max-width: 1120px;
     }
 
     .liivv-header {
@@ -64,7 +73,7 @@ st.markdown(
 
     .liivv-logo {
         font-family: 'Montserrat', Arial, sans-serif;
-        font-size: 4.6rem;
+        font-size: 4.2rem;
         color: #EBA6A6;
         margin: 0;
         letter-spacing: 12px;
@@ -76,7 +85,7 @@ st.markdown(
         font-family: 'Montserrat', sans-serif;
         color: #F7F2F4;
         font-size: 0.84rem;
-        letter-spacing: 5px;
+        letter-spacing: 4px;
         text-transform: uppercase;
         margin-top: 10px;
         font-weight: 700;
@@ -93,10 +102,10 @@ st.markdown(
 
     .intro-title {
         font-family: 'Montserrat', sans-serif;
-        font-size: 1.45rem;
+        font-size: 1.55rem;
         color: #7A3C4B;
         font-weight: 800;
-        margin: 0 0 6px 0;
+        margin-bottom: 6px;
     }
 
     .intro-text, .small-text {
@@ -111,7 +120,7 @@ st.markdown(
         font-family: 'Montserrat', sans-serif;
         font-weight: 800;
         color: #7A3C4B;
-        font-size: 1.1rem;
+        font-size: 1.08rem;
         margin-bottom: 12px;
     }
 
@@ -141,7 +150,7 @@ st.markdown(
         border-color: rgba(122,60,75,0.22);
     }
 
-    .metric-box {
+    .technical-box {
         background: #F7F2F4;
         border-left: 5px solid #EBA6A6;
         border-radius: 14px;
@@ -157,12 +166,6 @@ st.markdown(
         font-weight: 800;
         color: #7A3C4B;
     }
-
-    hr {
-        border: none;
-        border-top: 1px solid rgba(0,0,0,0.08);
-        margin: 14px 0;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -173,29 +176,26 @@ st.markdown(
 # GOOGLE SHEETS
 # =========================================================
 
-def get_google_sheet():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-
-    service_account_info = dict(st.secrets["gcp_service_account"])
-
+@st.cache_resource
+def get_client() -> gspread.Client:
     credentials = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=scopes,
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES,
     )
+    return gspread.authorize(credentials)
 
-    client = gspread.authorize(credentials)
-    sheet_id = st.secrets["GOOGLE_SHEET_ID"]
 
-    return client.open_by_key(sheet_id)
+def get_spreadsheet():
+    if not SPREADSHEET_ID:
+        st.error("SPREADSHEET_ID não encontrado nos Secrets do Streamlit.")
+        st.stop()
+
+    return get_client().open_by_key(SPREADSHEET_ID)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_password_from_sheet():
-    spreadsheet = get_google_sheet()
-    worksheet = spreadsheet.sheet1
+    worksheet = get_spreadsheet().worksheet(ACCESS_SHEET_NAME)
     records = worksheet.get_all_records()
 
     for row in records:
@@ -209,7 +209,7 @@ def get_password_from_sheet():
 
 
 def save_result_to_sheet(client_name, service_type, observations, report_text):
-    spreadsheet = get_google_sheet()
+    spreadsheet = get_spreadsheet()
 
     try:
         worksheet = spreadsheet.worksheet("resultados")
@@ -233,7 +233,7 @@ def save_result_to_sheet(client_name, service_type, observations, report_text):
         service_type,
         observations,
         report_text,
-    ])
+    ], value_input_option="USER_ENTERED")
 
 
 # =========================================================
@@ -287,7 +287,7 @@ def check_password():
 
     if not senha_planilha:
         st.error("Senha não encontrada.")
-        st.caption("A primeira aba da planilha deve conter as colunas: campo | valor. Exemplo: senha | 100.")
+        st.caption("A aba de acesso deve conter as colunas: campo | valor. Exemplo: senha | 100.")
         st.stop()
 
     st.markdown('<div class="filter-card">', unsafe_allow_html=True)
@@ -332,8 +332,21 @@ def prepare_image(uploaded_file):
 # GEMINI
 # =========================================================
 
+def get_gemini_api_key():
+    return (
+        st.secrets.get("GEMINI_API_KEY")
+        or st.secrets.get("GOOGLE_API_KEY")
+    )
+
+
 def configure_gemini():
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    api_key = get_gemini_api_key()
+
+    if not api_key:
+        st.error("Chave Gemini não encontrada. Configure GEMINI_API_KEY nos Secrets do Streamlit.")
+        st.stop()
+
+    genai.configure(api_key=api_key)
     return genai.GenerativeModel("gemini-1.5-flash")
 
 
@@ -439,10 +452,7 @@ def main_app():
     col1, col2 = st.columns(2)
 
     with col1:
-        client_name = st.text_input(
-            "Nome da cliente",
-            placeholder="Ex: Mariana",
-        )
+        client_name = st.text_input("Nome da cliente", placeholder="Ex: Mariana")
 
         service_type = st.selectbox(
             "Serviço realizado",
