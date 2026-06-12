@@ -1,3 +1,4 @@
+import re
 import datetime
 from io import BytesIO
 
@@ -20,8 +21,8 @@ st.set_page_config(
 # =========================================================
 # SECRETS ESPERADOS NO STREAMLIT
 # =========================================================
-# SPREADSHEET_ID = "ID_DA_PLANILHA"
-# ACCESS_SHEET_NAME = "Página1"
+# SPREADSHEET_ID = "ID_OU_URL_DA_PLANILHA"
+# ACCESS_SHEET_NAME = "Página1"  # opcional
 # GEMINI_API_KEY = "SUA_CHAVE_GEMINI"
 #
 # [gcp_service_account]
@@ -37,8 +38,14 @@ st.set_page_config(
 # client_x509_cert_url="..."
 
 
-SPREADSHEET_ID = st.secrets.get("SPREADSHEET_ID") or st.secrets.get("GOOGLE_SHEET_ID")
-ACCESS_SHEET_NAME = st.secrets.get("ACCESS_SHEET_NAME", "Página1")
+RAW_SPREADSHEET_VALUE = (
+    st.secrets.get("SPREADSHEET_URL")
+    or st.secrets.get("SPREADSHEET_ID")
+    or st.secrets.get("GOOGLE_SHEET_ID")
+    or ""
+)
+
+ACCESS_SHEET_NAME = st.secrets.get("ACCESS_SHEET_NAME", "").strip()
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -150,18 +157,6 @@ st.markdown(
         border-color: rgba(122,60,75,0.22);
     }
 
-    .technical-box {
-        background: #F7F2F4;
-        border-left: 5px solid #EBA6A6;
-        border-radius: 14px;
-        padding: 12px 14px;
-        margin-top: 10px;
-        font-family: 'Montserrat', sans-serif;
-        color: #333;
-        font-size: 0.92rem;
-        line-height: 1.5;
-    }
-
     .mini-label {
         font-weight: 800;
         color: #7A3C4B;
@@ -175,6 +170,28 @@ st.markdown(
 # =========================================================
 # GOOGLE SHEETS
 # =========================================================
+
+def extract_spreadsheet_id(value: str) -> str:
+    value = str(value or "").strip().strip('"').strip("'")
+
+    if not value:
+        return ""
+
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", value)
+    if match:
+        return match.group(1)
+
+    if "/edit" in value:
+        return value.split("/edit")[0].strip()
+
+    if "?" in value:
+        return value.split("?")[0].strip()
+
+    return value.strip()
+
+
+SPREADSHEET_ID = extract_spreadsheet_id(RAW_SPREADSHEET_VALUE)
+
 
 @st.cache_resource
 def get_client() -> gspread.Client:
@@ -193,9 +210,21 @@ def get_spreadsheet():
     return get_client().open_by_key(SPREADSHEET_ID)
 
 
+def get_access_worksheet():
+    spreadsheet = get_spreadsheet()
+
+    if ACCESS_SHEET_NAME:
+        try:
+            return spreadsheet.worksheet(ACCESS_SHEET_NAME)
+        except Exception:
+            pass
+
+    return spreadsheet.get_worksheet(0)
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_password_from_sheet():
-    worksheet = get_spreadsheet().worksheet(ACCESS_SHEET_NAME)
+    worksheet = get_access_worksheet()
     records = worksheet.get_all_records()
 
     for row in records:
@@ -280,14 +309,18 @@ def check_password():
         senha_planilha = get_password_from_sheet()
     except Exception as exc:
         st.error("Erro ao acessar a senha na planilha.")
-        st.caption("Verifique se a planilha foi compartilhada com o e-mail da service account.")
         with st.expander("Detalhes técnicos"):
+            st.write("ID usado pelo app:")
+            st.code(SPREADSHEET_ID)
+            st.write("Aba configurada:")
+            st.code(ACCESS_SHEET_NAME or "primeira aba da planilha")
+            st.write("Erro:")
             st.code(str(exc))
         st.stop()
 
     if not senha_planilha:
         st.error("Senha não encontrada.")
-        st.caption("A aba de acesso deve conter as colunas: campo | valor. Exemplo: senha | 100.")
+        st.caption("A primeira aba da planilha deve conter as colunas: campo | valor. Exemplo: senha | 100.")
         st.stop()
 
     st.markdown('<div class="filter-card">', unsafe_allow_html=True)
