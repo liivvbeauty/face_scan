@@ -1,3 +1,4 @@
+import os
 import re
 import datetime
 from io import BytesIO
@@ -10,6 +11,10 @@ from google.oauth2.service_account import Credentials
 import google.generativeai as genai
 
 
+# =========================================================
+# CONFIG STREAMLIT
+# =========================================================
+
 st.set_page_config(
     page_title="LIIVV Beauty | Face Relax Scanner",
     page_icon="✨",
@@ -19,11 +24,12 @@ st.set_page_config(
 
 
 # =========================================================
-# SECRETS ESPERADOS NO STREAMLIT
+# SECRETS ESPERADOS
 # =========================================================
 # SPREADSHEET_ID = "ID_OU_URL_DA_PLANILHA"
-# ACCESS_SHEET_NAME = "Página1"  # opcional
-# GEMINI_API_KEY = "SUA_CHAVE_GEMINI"
+# ACCESS_SHEET_NAME = "senha"
+# SERVICES_SHEET_NAME = "servicos"
+# GEMINI_API_KEY = "SUA_CHAVE_REAL_DO_GEMINI"
 #
 # [gcp_service_account]
 # type="service_account"
@@ -45,7 +51,8 @@ RAW_SPREADSHEET_VALUE = (
     or ""
 )
 
-ACCESS_SHEET_NAME = st.secrets.get("ACCESS_SHEET_NAME", "").strip()
+ACCESS_SHEET_NAME = st.secrets.get("ACCESS_SHEET_NAME", "senha").strip()
+SERVICES_SHEET_NAME = st.secrets.get("SERVICES_SHEET_NAME", "servicos").strip()
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -54,7 +61,7 @@ SCOPES = [
 
 
 # =========================================================
-# IDENTIDADE VISUAL LIIVV
+# CSS LIIVV
 # =========================================================
 
 st.markdown(
@@ -204,27 +211,15 @@ def get_client() -> gspread.Client:
 
 def get_spreadsheet():
     if not SPREADSHEET_ID:
-        st.error("SPREADSHEET_ID não encontrado nos Secrets do Streamlit.")
+        st.error("SPREADSHEET_ID não encontrado nos Secrets.")
         st.stop()
 
     return get_client().open_by_key(SPREADSHEET_ID)
 
 
-def get_access_worksheet():
-    spreadsheet = get_spreadsheet()
-
-    if ACCESS_SHEET_NAME:
-        try:
-            return spreadsheet.worksheet(ACCESS_SHEET_NAME)
-        except Exception:
-            pass
-
-    return spreadsheet.get_worksheet(0)
-
-
 @st.cache_data(ttl=60, show_spinner=False)
 def get_password_from_sheet():
-    worksheet = get_access_worksheet()
+    worksheet = get_spreadsheet().worksheet(ACCESS_SHEET_NAME)
     records = worksheet.get_all_records()
 
     for row in records:
@@ -235,6 +230,20 @@ def get_password_from_sheet():
             return valor
 
     return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_services_from_sheet():
+    worksheet = get_spreadsheet().worksheet(SERVICES_SHEET_NAME)
+    values = worksheet.col_values(1)
+
+    services = []
+    for value in values[1:]:
+        value = str(value).strip()
+        if value:
+            services.append(value)
+
+    return services
 
 
 def save_result_to_sheet(client_name, service_type, observations, report_text):
@@ -248,25 +257,151 @@ def save_result_to_sheet(client_name, service_type, observations, report_text):
             rows=1000,
             cols=20,
         )
-        worksheet.append_row([
-            "data_hora",
-            "cliente",
-            "servico",
-            "observacoes",
-            "relatorio",
-        ])
+        worksheet.append_row(
+            [
+                "data_hora",
+                "cliente",
+                "servico",
+                "observacoes",
+                "relatorio",
+            ],
+            value_input_option="USER_ENTERED",
+        )
 
-    worksheet.append_row([
-        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        client_name,
-        service_type,
-        observations,
-        report_text,
-    ], value_input_option="USER_ENTERED")
+    worksheet.append_row(
+        [
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            client_name,
+            service_type,
+            observations,
+            report_text,
+        ],
+        value_input_option="USER_ENTERED",
+    )
 
 
 # =========================================================
-# COMPONENTES VISUAIS
+# GEMINI
+# =========================================================
+
+def get_gemini_api_key():
+    return (
+        st.secrets.get("GEMINI_API_KEY")
+        or st.secrets.get("GOOGLE_API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
+    )
+
+
+def configure_gemini():
+    api_key = get_gemini_api_key()
+
+    if not api_key or api_key.strip() in ["SUA_CHAVE_GEMINI", "COLE_AQUI_A_CHAVE_REAL_DO_GEMINI"]:
+        st.error("Chave Gemini inválida. Configure GEMINI_API_KEY nos Secrets do Streamlit com uma chave real.")
+        st.stop()
+
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel("models/gemini-2.5-flash")
+
+
+def analyze_with_gemini(before_image, after_image, client_name, service_type, observations):
+    model = configure_gemini()
+
+    prompt = f"""
+Você é uma consultora premium da LIIVV Beauty, especializada em bem-estar facial,
+massagem relaxante, imagem pessoal e percepção visual de descanso.
+
+Você receberá duas imagens:
+1. Foto ANTES da massagem
+2. Foto DEPOIS da massagem
+
+Cliente: {client_name}
+Serviço realizado: {service_type}
+Observações internas: {observations}
+
+REGRAS OBRIGATÓRIAS DE HONESTIDADE:
+1. Não force melhora visual se ela não estiver claramente perceptível.
+2. Se as fotos tiverem iluminação, ângulo, distância, expressão facial, enquadramento ou nitidez diferentes, informe que a análise é parcialmente conclusiva ou inconclusiva.
+3. Se as imagens forem muito semelhantes ou insuficientes, diga claramente: "Não foi possível confirmar mudanças visuais relevantes com segurança."
+4. A análise é estética e visual, não médica.
+5. Não faça diagnóstico clínico.
+6. Não afirme idade, doença, estado psicológico ou condição de saúde.
+7. Não prometa resultado permanente.
+8. Use linguagem sofisticada, objetiva e adequada a um salão premium.
+
+Avalie visualmente:
+- Aparência geral de cansaço facial
+- Região dos olhos
+- Testa e sinais de tensão visual
+- Mandíbula e expressão facial
+- Simetria visual percebida
+- Expressão geral de relaxamento
+- Aparência de bem-estar
+- Qualidade comparativa das fotos
+
+Formato obrigatório:
+
+# LIIVV Face Relax Report
+
+## Conclusão da análise
+Diga se a análise é conclusiva, parcialmente conclusiva ou inconclusiva.
+
+## Nível de confiabilidade
+Alta, Média ou Baixa. Explique objetivamente.
+
+## Resumo executivo
+Texto curto, sofisticado e honesto.
+
+## Comparativo de scores
+Tabela em markdown:
+Indicador | Antes | Depois | Evolução percebida | Confiança
+
+## Evidências visuais observadas
+Liste apenas o que realmente foi possível observar.
+
+## Pontos que limitaram a análise
+Liste iluminação, ângulo, nitidez, enquadramento, expressão ou distância, se aplicável.
+
+## Leitura por região facial
+### Olhos
+### Testa
+### Mandíbula
+### Expressão geral
+
+## Recomendação de continuidade LIIVV
+Sugira próximos cuidados dentro do salão, sem linguagem médica e sem promessa de resultado.
+
+## Mensagem curta para a cliente
+Texto curto, bonito e compartilhável.
+
+## Observação importante
+Informe que esta é uma análise visual, estética e não médica.
+"""
+
+    response = model.generate_content([
+        prompt,
+        before_image,
+        after_image,
+    ])
+
+    return response.text
+
+
+# =========================================================
+# IMAGENS
+# =========================================================
+
+def prepare_image(uploaded_file):
+    image = Image.open(uploaded_file).convert("RGB")
+    image.thumbnail((1600, 1600))
+
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=90)
+
+    return image
+
+
+# =========================================================
+# UI
 # =========================================================
 
 def render_header():
@@ -288,18 +423,13 @@ def render_intro():
             <div class="intro-title">O que mudou no seu rosto depois da massagem?</div>
             <p class="intro-text">
                 Envie uma foto antes e outra depois do atendimento. A LIIVV gera uma leitura visual
-                de descanso, relaxamento facial e aparência de bem-estar, criando uma experiência
-                mais objetiva, premium e memorável para a cliente.
+                de descanso, relaxamento facial e aparência de bem-estar, com análise honesta e sem forçar conclusões.
             </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-
-# =========================================================
-# AUTENTICAÇÃO
-# =========================================================
 
 def check_password():
     render_header()
@@ -310,28 +440,22 @@ def check_password():
     except Exception as exc:
         st.error("Erro ao acessar a senha na planilha.")
         with st.expander("Detalhes técnicos"):
-            st.write("ID usado pelo app:")
+            st.write("ID usado:")
             st.code(SPREADSHEET_ID)
-            st.write("Aba configurada:")
-            st.code(ACCESS_SHEET_NAME or "primeira aba da planilha")
-            st.write("Erro:")
+            st.write("Aba de senha:")
+            st.code(ACCESS_SHEET_NAME)
             st.code(str(exc))
         st.stop()
 
     if not senha_planilha:
         st.error("Senha não encontrada.")
-        st.caption("A primeira aba da planilha deve conter as colunas: campo | valor. Exemplo: senha | 100.")
+        st.caption("A aba de senha deve conter as colunas: campo | valor. Exemplo: senha | 100.")
         st.stop()
 
     st.markdown('<div class="filter-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Acesso ao app</div>', unsafe_allow_html=True)
 
-    senha_digitada = st.text_input(
-        "Digite a senha",
-        type="password",
-        placeholder="Senha de acesso",
-    )
-
+    senha_digitada = st.text_input("Digite a senha", type="password")
     entrar = st.button("Entrar")
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -347,137 +471,23 @@ def check_password():
         st.stop()
 
 
-# =========================================================
-# IMAGENS
-# =========================================================
-
-def prepare_image(uploaded_file):
-    image = Image.open(uploaded_file).convert("RGB")
-    image.thumbnail((1600, 1600))
-
-    buffer = BytesIO()
-    image.save(buffer, format="JPEG", quality=90)
-
-    return image
-
-
-# =========================================================
-# GEMINI
-# =========================================================
-
-def get_gemini_api_key():
-    return (
-        st.secrets.get("GEMINI_API_KEY")
-        or st.secrets.get("GOOGLE_API_KEY")
-    )
-
-
-def configure_gemini():
-    api_key = get_gemini_api_key()
-
-    if not api_key:
-        st.error("Chave Gemini não encontrada. Configure GEMINI_API_KEY nos Secrets do Streamlit.")
-        st.stop()
-
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel("gemini-1.5-flash")
-
-
-def analyze_with_gemini(before_image, after_image, client_name, service_type, observations):
-    model = configure_gemini()
-
-    prompt = f"""
-Você é uma consultora premium da LIIVV Beauty, especializada em bem-estar facial,
-massagem relaxante, imagem pessoal e percepção visual de descanso.
-
-Você receberá duas imagens:
-1. Foto ANTES da massagem
-2. Foto DEPOIS da massagem
-
-Cliente: {client_name}
-Serviço realizado: {service_type}
-Observações internas da profissional: {observations}
-
-Regras importantes:
-- Faça uma análise visual, estética e não médica.
-- Não use linguagem clínica.
-- Não diga que diagnosticou nada.
-- Não prometa resultado permanente.
-- Não afirme idade, doença, estado psicológico ou condição de saúde.
-- Compare apenas sinais visuais percebidos nas imagens.
-- Use linguagem sofisticada, acolhedora e adequada a um salão premium.
-
-Analise visualmente:
-1. Aparência geral de cansaço facial
-2. Região dos olhos
-3. Testa e linhas associadas à tensão
-4. Mandíbula e expressão facial
-5. Simetria visual percebida
-6. Expressão geral de relaxamento
-7. Aparência de bem-estar
-
-Crie scores de 0 a 100:
-- Fadiga facial antes
-- Fadiga facial depois
-- Relaxamento facial antes
-- Relaxamento facial depois
-- Tensão mandibular antes
-- Tensão mandibular depois
-- Expressão de bem-estar antes
-- Expressão de bem-estar depois
-- Wellness Face Score antes
-- Wellness Face Score depois
-
-Formato obrigatório:
-
-# LIIVV Face Relax Report
-
-## Resumo executivo
-Texto curto, sofisticado e objetivo.
-
-## Comparativo de scores
-Tabela em markdown:
-Indicador | Antes | Depois | Evolução percebida
-
-## Principais mudanças percebidas
-Lista objetiva.
-
-## Pontos de maior evolução
-Lista objetiva.
-
-## Leitura por região facial
-### Olhos
-### Testa
-### Mandíbula
-### Expressão geral
-
-## Recomendação de continuidade
-Sugira próximos cuidados dentro do salão, como massagem relaxante, quick massage,
-drenagem facial ou ritual de relaxamento, sem linguagem médica.
-
-## Mensagem curta para a cliente
-Texto curto, bonito e compartilhável.
-
-## Observação importante
-Informe que esta é uma análise visual, estética e não médica.
-"""
-
-    response = model.generate_content([
-        prompt,
-        before_image,
-        after_image,
-    ])
-
-    return response.text
-
-
-# =========================================================
-# APP PRINCIPAL
-# =========================================================
-
 def main_app():
     render_header()
     render_intro()
+
+    try:
+        services = load_services_from_sheet()
+    except Exception as exc:
+        st.error("Erro ao carregar os serviços da planilha.")
+        with st.expander("Detalhes técnicos"):
+            st.write("Aba de serviços:")
+            st.code(SERVICES_SHEET_NAME)
+            st.code(str(exc))
+        st.stop()
+
+    if not services:
+        st.error("Nenhum serviço encontrado na aba de serviços.")
+        st.stop()
 
     st.markdown('<div class="filter-card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Informações do atendimento</div>', unsafe_allow_html=True)
@@ -486,19 +496,7 @@ def main_app():
 
     with col1:
         client_name = st.text_input("Nome da cliente", placeholder="Ex: Mariana")
-
-        service_type = st.selectbox(
-            "Serviço realizado",
-            [
-                "Massagem relaxante",
-                "Massagem terapêutica",
-                "Quick massage",
-                "Massagem facial",
-                "Drenagem linfática",
-                "Ritual de relaxamento LIIVV",
-                "Outro",
-            ],
-        )
+        service_type = st.selectbox("Serviço realizado", services)
 
     with col2:
         observations = st.text_area(
@@ -580,12 +578,10 @@ def main_app():
         st.markdown(report)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        file_name = f"relatorio_liivv_face_relax_{client_name.strip().replace(' ', '_').lower()}.txt"
-
         st.download_button(
             label="Baixar relatório em TXT",
             data=report,
-            file_name=file_name,
+            file_name=f"relatorio_liivv_face_relax_{client_name.strip().replace(' ', '_').lower()}.txt",
             mime="text/plain",
             use_container_width=True,
         )
